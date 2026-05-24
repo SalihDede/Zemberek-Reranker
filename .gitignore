@@ -1,0 +1,24 @@
+# Environment
+.env
+*.env
+
+# Python
+zemberekvenv/
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Java
+*.class
+hs_err_pid*.log
+
+# Output
+WikiOutput.txt
+WikiOutput.json
+
+# IDE
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
