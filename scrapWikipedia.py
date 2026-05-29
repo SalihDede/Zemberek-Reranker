@@ -32,7 +32,8 @@ def main_body_cek(url):
 
     for p in paragraflar:
         metin = p.get_text(separator=" ", strip=True)
-        metin = re.sub(r'\[\d+\]', '', metin)   # dipnot numaraları [1] [2]
+        metin = re.sub(r'\[\s*\d+\s*\]', '', metin)  # dipnotlar [1] veya [ 6 ]
+        metin = re.sub(r"\s+'", "'", metin)           # "Ödülü 'ne" → "Ödülü'ne"
         metin = re.sub(r'\s+', ' ', metin).strip()
         if metin:
             temiz_paragraflar.append(metin)
