@@ -77,19 +77,13 @@ def _filter_legend(word_analyses: dict[str, list[str]]) -> str:
         if not line or line.startswith("#"):
             continue
         # Satırdaki kısaltmaları (büyük harf+küçük harf kombinasyonları) çek
-        tags = re.findall(r'\b[A-Z][a-z0-9]+\b', line)
+        tags = re.findall(r'\b[A-Z][A-Za-z0-9]+\b', line)
         if any(tag in all_text for tag in tags):
             relevant.append(line)
     return "\n".join(relevant) if relevant else _TAG_LEGEND
 
 
-def _build_prompt(sentence: str, word_analyses: dict[str, list[str]]) -> str:
-    # Yalnızca birden fazla adayı olan (gerçekten belirsiz) kelimeler
-    ambiguous = {w: c for w, c in word_analyses.items() if len(c) > 1}
-    if not ambiguous:
-        return ""
-
-    legend = _filter_legend(ambiguous)
+def _build_prompt(sentence: str, ambiguous: dict[str, list[str]], legend: str) -> str:
     lines = []
     for word, candidates in ambiguous.items():
         numbered = "\n".join(f"  {i}: {c}" for i, c in enumerate(candidates))
@@ -112,11 +106,112 @@ Sadece JSON döndür, başka hiçbir şey yazma. Tüm kelimeler ({word_list}) i�
 {{"kelime": indeks}}"""
 
 
+def _build_cot_prompt(
+    sentence: str,
+    ambiguous: dict[str, list[str]],
+    initial_selections: dict[str, str],
+    legend: str,
+) -> str:
+    """
+    Chain-of-thought ikinci geçiş: İlk seçimi göster, bağımsız yeniden değerlendir.
+    Model hem ilk seçimi hem de tüm adayları görür; kendi gerekçesiyle en iyisini seçer.
+    """
+    lines = []
+    for word, candidates in ambiguous.items():
+        if word not in initial_selections:
+            continue
+        prev = initial_selections[word]
+        prev_idx = candidates.index(prev) if prev in candidates else 0
+        numbered = "\n".join(f"  {i}: {c}" for i, c in enumerate(candidates))
+        lines.append(
+            f'"{word}" (ilk seçim: [{prev_idx}]):\n{numbered}'
+        )
+
+    block = "\n\n".join(lines)
+    word_list = ", ".join(f'"{w}"' for w in ambiguous if w in initial_selections)
+
+    return f"""Türkçe morfoloji uzmanısın. Bir önceki model bu cümle için aşağıdaki morfolojik seçimleri yaptı.
+Sen bu seçimleri sıfırdan ve bağımsız olarak yeniden değerlendiriyorsun.
+
+Değerlendirme adımları:
+1. Cümledeki her kelimenin gramer rolünü belirle (özne/nesne/yüklem/zarf vs.)
+2. Her kelime için hangi morfolojik analiz bu role en uygun?
+3. Eğer ilk seçim mantıklıysa onu onayla, daha iyi bir aday varsa onu seç.
+
+Etiket sözlüğü:
+{legend}
+
+Cümle: "{sentence}"
+
+Kelimeler ve adaylar (ilk seçim parantez içinde):
+{block}
+
+Sadece JSON döndür, başka hiçbir şey yazma. Tüm kelimeler ({word_list}) için indeks ver:
+{{"kelime": indeks}}"""
+
+
+def judge_and_rerank(
+    sentence: str,
+    word_analyses: dict[str, list[str]],
+    initial_selections: dict[str, str],
+) -> dict[str, str]:
+    """
+    LLM-as-Judge (CoT ikinci geçiş):
+    - İlk seçimi bağımsız olarak yeniden değerlendirir
+    - Chain-of-thought ile gramer rolünü analiz eder
+    - Döndürür: {kelime: seçilen_analiz_metni}
+    """
+    ambiguous = {
+        w: c for w, c in word_analyses.items()
+        if len(c) > 1 and w in initial_selections
+    }
+    if not ambiguous:
+        return initial_selections
+
+    legend = _filter_legend(ambiguous)
+    client = _get_client()
+
+    cot_prompt = _build_cot_prompt(sentence, ambiguous, initial_selections, legend)
+    try:
+        raw = _call_llm(cot_prompt, client, use_json_format=True, temperature=0.3)
+    except Exception:
+        raw = _call_llm(cot_prompt, client, use_json_format=False, temperature=0.3)
+
+    new_selections = _parse_raw(raw)
+
+    # Retry
+    if new_selections is None:
+        retry = (
+            f'Cümle: "{sentence}"\n\n'
+            + "\n".join(
+                f'"{w}": ' + " | ".join(f"{i}={c}" for i, c in enumerate(cands))
+                for w, cands in ambiguous.items()
+            )
+            + '\n\nSadece JSON: {"kelime": indeks_sayısı}'
+        )
+        try:
+            raw = _call_llm(retry, client, use_json_format=False)
+            new_selections = _parse_raw(raw)
+        except Exception:
+            new_selections = None
+
+    if not new_selections:
+        return initial_selections
+
+    result = dict(initial_selections)
+    for word, candidates in ambiguous.items():
+        idx = new_selections.get(word, None)
+        if not isinstance(idx, int) or not (0 <= idx < len(candidates)):
+            continue
+        result[word] = candidates[idx]
+
+    return result
+
+
 def _parse_raw(raw: str) -> "dict | None":
-    if "```" in raw:
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
+    match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw, re.DOTALL)
+    if match:
+        raw = match.group(1)
     raw = raw.strip()
     try:
         return json.loads(raw)
@@ -124,11 +219,11 @@ def _parse_raw(raw: str) -> "dict | None":
         return None
 
 
-def _call_llm(prompt: str, client: OpenAI, use_json_format: bool) -> str:
+def _call_llm(prompt: str, client: OpenAI, use_json_format: bool, temperature: float = 0) -> str:
     kwargs = dict(
         model=LLM_MODEL,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0,
+        temperature=temperature,
     )
     if use_json_format:
         kwargs["response_format"] = {"type": "json_object"}
@@ -151,7 +246,8 @@ def rank_sentence(sentence: str, word_analyses: dict[str, list[str]]) -> dict[st
     if not ambiguous:
         return result
 
-    prompt = _build_prompt(sentence, ambiguous)
+    legend = _filter_legend(ambiguous)
+    prompt = _build_prompt(sentence, ambiguous, legend)
     client = _get_client()
 
     # İlk deneme: response_format ile
@@ -167,6 +263,7 @@ def rank_sentence(sentence: str, word_analyses: dict[str, list[str]]) -> dict[st
     # Retry: JSON parse başarısızsa daha sade prompt ile tekrar dene
     if selections is None:
         retry_prompt = (
+            f"Etiket sözlüğü:\n{legend}\n\n"
             f'Cümle: "{sentence}"\n\n'
             + "\n".join(
                 f'"{w}": ' + " | ".join(f"{i}={c}" for i, c in enumerate(cands))

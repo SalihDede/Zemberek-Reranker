@@ -2,7 +2,11 @@ import argparse
 import sys
 import os
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_here = os.path.dirname(os.path.abspath(__file__))
+_root = os.path.dirname(_here)
+for _p in (_here, _root):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from chunker import paragraph_chunks, sentence_chunks
 from zemberek_client import ZemberekClient
@@ -77,7 +81,12 @@ def main():
     print(f"Strateji  : {args.strategy}")
     print(f"URL sayısı: {len(urls)}")
 
-    zemberek = ZemberekClient()
+    try:
+        zemberek = ZemberekClient()
+    except ConnectionError as e:
+        print(f"Hata: {e}", file=sys.stderr)
+        sys.exit(1)
+
     try:
         for url in urls:
             process_url(url, zemberek, strategy=args.strategy)
