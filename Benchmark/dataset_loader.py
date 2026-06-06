@@ -5,8 +5,9 @@ from typing import Iterator
 @dataclass
 class Token:
     form: str
-    gold_tags: list[str]   # eşleştirme için kaynak dataset etiketleri
-    upos: str = ""         # sadece CoNLL-U için
+    gold_tags: list[str]
+    upos: str
+    surface_igs: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -15,85 +16,78 @@ class Sentence:
     tokens: list[Token]
 
 
-# ── TRMOR / Oflazer ──────────────────────────────────────────────
+def _tr_lower(text: str) -> str:
+    """Turkish-aware lowercase for stable surface comparisons."""
+    return text.replace('I', 'ı').replace('İ', 'i').lower()
 
-def _trmor_tags(analysis: str) -> list[str]:
+
+def _igs_to_token(igs: list[tuple[str, list[str], str]]) -> Token:
+    form = ''.join(ig[0] for ig in igs)
+    gold_tags = [feature for ig in igs for feature in ig[1]]
+    upos = igs[-1][2]
+    surface_igs = [_tr_lower(ig[0]) for ig in igs]
+    return Token(form=form, gold_tags=gold_tags, upos=upos, surface_igs=surface_igs)
+
+
+def _append_token(tokens: list[Token], current_igs: list[tuple[str, list[str], str]]) -> None:
+    if not current_igs:
+        return
+    token = _igs_to_token(current_igs)
+    if token.upos != 'PUNCT':
+        tokens.append(token)
+
+
+def load_twt(path: str) -> Iterator[Sentence]:
     """
-    "yap+Verb+Prog2+A3sg+Cop"             → ["Verb","Prog2","A3sg","Cop"]
-    "ver+Verb^DB+Noun+Inf2+A3sg+Pnon+Acc" → ["Verb","Noun","Inf2","A3sg","Pnon","Acc"]
+    Google Turkish Web Treebank CoNLL-U loader.
+
+    TWT rows are inflectional groups (IGs), not ordinary whitespace tokens.
+    Consecutive non-punctuation IG rows joined by SpaceAfter=No are folded
+    into one surface token while preserving the IG surface forms as gold.
     """
-    parts = analysis.replace('^DB', '').split('+')
-    return [p.strip() for p in parts[1:] if p.strip()]
-
-
-def _is_xml(form: str) -> bool:
-    return form.startswith('<')
-
-
-def load_trmor(path: str) -> Iterator[Sentence]:
-    """
-    TrMor2018: word<TAB>doğru_analiz[<TAB>alt1...]
-    <S>…</S> etiketlerini cümle sınırı olarak kullanır,
-    diğer XML etiketlerini (<DOC>, <TITLE>…) atlar.
-    """
-    tokens: list[Token] = []
-    in_sentence = False
-
-    with open(path, encoding='utf-8') as f:
-        for line in f:
-            line = line.rstrip('\n')
-            if not line.strip():
-                continue
-
-            parts = line.split('\t')
-            form = parts[0].strip()
-            gold_analysis = parts[1].strip() if len(parts) > 1 else ''
-
-            if form == '<S>':
-                in_sentence = True
-                tokens = []
-                continue
-            if form == '</S>':
-                if tokens:
-                    yield Sentence(' '.join(t.form for t in tokens), tokens)
-                tokens = []
-                in_sentence = False
-                continue
-
-            # Diğer XML etiketlerini atla
-            if _is_xml(form):
-                continue
-
-            if in_sentence:
-                tokens.append(Token(form=form, gold_tags=_trmor_tags(gold_analysis)))
-
-    if tokens:
-        yield Sentence(' '.join(t.form for t in tokens), tokens)
-
-
-# ── CoNLL-U (BOUN-UD, IMST-UD) ───────────────────────────────────
-
-def load_conllu(path: str) -> Iterator[Sentence]:
-    """CoNLL-U formatı — BOUN-UD ve IMST-UD için."""
     text = ''
     tokens: list[Token] = []
+    current_igs: list[tuple[str, list[str], str]] = []
 
     with open(path, encoding='utf-8') as f:
         for line in f:
             line = line.rstrip('\n')
             if line.startswith('# text'):
                 text = line.split('=', 1)[-1].strip()
-            elif line.startswith('#') or not line:
+                continue
+            if line.startswith('#'):
+                continue
+            if not line:
+                if current_igs:
+                    _append_token(tokens, current_igs)
+                    current_igs = []
                 if tokens:
                     yield Sentence(text, tokens)
-                    text = ''
-                    tokens = []
-            else:
-                parts = line.split('\t')
-                if len(parts) < 10 or '-' in parts[0] or '.' in parts[0]:
-                    continue
-                feats = [p for p in parts[5].split('|') if '=' in p] if parts[5] != '_' else []
-                tokens.append(Token(form=parts[1], gold_tags=feats, upos=parts[3]))
+                text = ''
+                tokens = []
+                continue
 
+            parts = line.split('\t')
+            if len(parts) < 10 or '-' in parts[0] or '.' in parts[0]:
+                continue
+
+            ig_form = parts[1]
+            upos = parts[3]
+            feats = [p for p in parts[5].split('|') if '=' in p] if parts[5] != '_' else []
+            misc = parts[9]
+
+            if upos == 'PUNCT':
+                if current_igs:
+                    _append_token(tokens, current_igs)
+                    current_igs = []
+                continue
+
+            current_igs.append((ig_form, feats, upos))
+            if 'SpaceAfter=No' not in misc:
+                _append_token(tokens, current_igs)
+                current_igs = []
+
+    if current_igs:
+        _append_token(tokens, current_igs)
     if tokens:
         yield Sentence(text, tokens)
