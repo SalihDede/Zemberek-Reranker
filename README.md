@@ -1,119 +1,244 @@
 # Zemberek LLM Reranker
 
-A context-aware morphological disambiguation tool for Turkish text, powered by LLMs.
+LLM destekli Türkçe morfolojik belirsizlik giderme (morphological disambiguation) aracı.
 
-## What is it?
+---
 
-Turkish is a morphologically rich language where a single word can have multiple valid analyses depending on context. For example:
+## Neden bu proje?
 
-```
-"koyun" →  [koyun:Noun] koyun:Noun+A3sg       (sheep)
-           [koymak:Verb] koy:Verb+Imp+un:A2pl  (imperative: put it)
-           [koy:Noun] koy:Noun+A3sg+un:Gen      (of the cove)
-```
-
-Choosing the correct analysis requires understanding the surrounding context. This project:
-
-1. Uses **Zemberek** to generate all possible morphological analyses for each word
-2. Fetches **Wikipedia** articles as source text
-3. Uses an **LLM** (any OpenAI-compatible model) to select the correct analysis based on context
-
-## Architecture
+Türkçe, aglütinatif yapısı nedeniyle bir kelimenin onlarca farklı analizi olabilir. Hangi analizin doğru olduğu yalnızca bağlam incelenerek anlaşılabilir.
 
 ```
-source.txt  (list of Wikipedia URLs)
-        ↓
-  Wikipedia Scraper
-        ↓
-  Paragraph Chunker
-        ↓
-  Zemberek Gateway  →  N candidate analyses per word
-        ↓
-  LLM Ranker        →  pick the best analysis given context
-        ↓
-  Disambiguated morphological output
+"koyun" →  [koyun:Noun]  koyun:Noun+A3sg        → koyun (hayvan)
+           [koy:Noun]    koy:Noun+A3sg+un:Gen    → koyun (koyun-un, tamlayan)
+           [koymak:Verb] koy:Verb+Imp+un:A2pl    → koyun (emir: koyunuz)
 ```
 
-## Usage
+**Zemberek** tüm olası analizleri üretir. Bu proje, doğru analizin hangisi olduğuna **LLM'in bağlam anlayışını** kullanarak karar verir.
 
-### 1. Start the Zemberek Gateway
+---
+
+## Proje Akışı
+
+```
+Wikipedia URL listesi (source.txt)
+        │
+        ▼
+  Wikipedia Scraper          (scrapWikipedia.py)
+        │  — Makale metni çeker
+        ▼
+  Paragraph Chunker          (LLMBaseRanking/chunker.py)
+        │  — Metni cümle / paragraf parçalarına böler
+        ▼
+  Zemberek Java Gateway      (Zemberek Morfoloji/)
+        │  — Her kelime için N aday morfolojik analiz üretir
+        │  — py4j köprüsü üzerinden Python'a iletir
+        ▼
+  LLM Ranker                 (LLMBaseRanking/ranker.py)
+        │  — Aday analizleri cümle bağlamıyla birlikte LLM'e gönderir
+        │  — LLM her kelime için doğru indeksi JSON olarak döndürür
+        │
+        ├─► [isteğe bağlı] LLM-as-Judge (CoT ikinci geçiş)
+        │     — İlk seçimi bağımsız olarak yeniden değerlendirir
+        │     — Gramer rolünü (özne/nesne/yüklem) analiz eder
+        │
+        ▼
+  Disambiguation çıktısı
+        — Her kelime için seçilen morfolojik analiz
+```
+
+### İki Çalışma Modu
+
+| Mod | Açıklama |
+|-----|----------|
+| **Pure LLM** | Tek geçişte tüm belirsiz kelimeleri çözer |
+| **LLM + Judge** | İlk seçimi CoT (chain-of-thought) ile ikinci bir LLM geçişiyle doğrular |
+
+---
+
+## Kurulum
+
+### Gereksinimler
+
+- Python 3.9+
+- Java 17+
+- OpenAI-uyumlu herhangi bir LLM API'si (Ollama, OpenRouter, vb.)
+
+### Paketler
 
 ```bash
-cd "Zemberek Morfoloji"
-./start_zemberek_gateway.sh
+pip install openai py4j python-dotenv beautifulsoup4 requests
 ```
 
-### 2. Create your `.env` file
+### `.env` Dosyası
 
 ```bash
 cp LLMBaseRanking/.env.example LLMBaseRanking/.env
 ```
 
-Any OpenAI-compatible provider is supported:
+`LLMBaseRanking/.env` dosyasını aşağıdaki şablonlardan biriyle doldurun:
 
 ```env
-# Ollama (local)
+# Ollama (yerel)
 LLM_BASE_URL=http://localhost:11434/v1
-LLM_MODEL=gemma4:26b
+LLM_MODEL=gemma3:27b
 LLM_API_KEY=ollama
 
 # OpenRouter
 LLM_BASE_URL=https://openrouter.ai/api/v1
 LLM_MODEL=anthropic/claude-3-5-sonnet
 LLM_API_KEY=sk-or-...
+
+# OpenAI
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_MODEL=gpt-4o
+LLM_API_KEY=sk-...
 ```
 
-### 3. Add Wikipedia URLs to `source.txt`
+---
+
+## Çalıştırma
+
+### Metin Analizi (Ana Kullanım)
+
+**1.** `source.txt` dosyasına Wikipedia URL'lerini ekleyin:
 
 ```
 https://tr.wikipedia.org/wiki/Aziz_Sancar
 https://tr.wikipedia.org/wiki/Atatürk
 ```
 
-### 4. Run
+**2.** Tek komutla çalıştırın:
 
 ```bash
-cd LLMBaseRanking
-python3 main.py ../source.txt
+./run.sh
 ```
 
-### Sample Output
+> `run.sh`, Java gateway'i derler, başlatır ve Python analiz motorunu çalıştırır.  
+> İşlem bitince gateway otomatik kapatılır.
+
+İsteğe bağlı argümanlar:
+
+```bash
+./run.sh source.txt paragraph   # kaynak ve chunk stratejisi
+./run.sh source.txt sentence    # cümle bazlı chunk (varsayılan)
+```
+
+### Örnek Çıktı
 
 ```
 Paragraph 1: Koyun otluyordu.
 
-  Koyun:
+  koyun:
       [0] [koymak:Verb] koy:Verb+Imp+un:A2pl
-      [1] [koy:Noun] koy:Noun+A3sg+un:Gen
-    → [2] [koyun:Noun] koyun:Noun+A3sg        ✓ LLM selection
+      [1] [koy:Noun]    koy:Noun+A3sg+un:Gen
+    → [2] [koyun:Noun]  koyun:Noun+A3sg         ✓ LLM seçimi
 ```
 
-## Requirements
+---
 
-- Python 3.9+
-- Java 17+
-- Ollama or any OpenAI-compatible LLM API
+## Benchmark
+
+Sistem, Google **Turkish Web Treebank (TWT)** veri setiyle değerlendirilir.  
+TWT, insan-anotasyonlu CoNLL-U formatında Türkçe cümleler içerir.
+
+### Değerlendirme Yöntemi
+
+- Sadece **birden fazla Zemberek adayı olan kelimeler** değerlendirilir (gerçek belirsizlik)
+- Baseline: Zemberek'in ilk adayı (kural-tabanlı)
+- LLM: Bu projenin seçimi
+- Karşılaştırma: Seçilen morfem dizisi, TWT'nin gold morfem dizisiyle eşleşiyor mu?
+
+### Benchmark'ı Çalıştırma
 
 ```bash
-pip install openai py4j python-dotenv beautifulsoup4 requests
+./benchmark.sh
 ```
 
-## Project Structure
+> Veri seti yoksa otomatik indirilir, gateway başlatılır, benchmark çalışır.
+
+Ek seçenekler:
+
+```bash
+# Adım adım canlı çıktı
+./benchmark.sh --step
+
+# Yalnızca yanlış tahminleri göster
+./benchmark.sh --verbose
+
+# LLM-as-Judge ikinci geçişini etkinleştir
+./benchmark.sh --judge
+
+# İlk N cümleyle sınırla (hızlı test)
+./benchmark.sh --limit 100
+
+# Karar logunu farklı dosyaya yaz
+./benchmark.sh --json-log benchmark_logs/my_run.jsonl
+```
+
+### Benchmark Çıktısı
 
 ```
-Zemberek Morfoloji/      ← Zemberek Java gateway
-LLMBaseRanking/          ← LLM-based ranking engine
-  ├── main.py            ← entry point
-  ├── ranker.py          ← LLM call and analysis selection
-  ├── chunker.py         ← text chunking strategies
-  ├── zemberek_client.py
-  └── config.py
-scrapWikipedia.py        ← Wikipedia scraper
-source.txt               ← list of Wikipedia URLs to process
+══════════════════════════════════════════════════════════
+BENCHMARK — WEB
+══════════════════════════════════════════════════════════
+Toplam kelime              : 3842
+  Belirsiz (LLM gerekli)   : 1205
+  Tek adaylı               : 2637
+
+Disambiguation accuracy (belirsiz kelimeler):
+  Baseline        : 891/1205 = 74.0%
+  Pure LLM        : 963/1205 = 79.9%  (+5.9% vs baseline)
+  LLM + Judge     : 971/1205 = 80.6%  (+6.6% vs baseline  +0.7% vs pure)
+
+Genel doğruluk — Pure LLM  : 3200/3842 = 83.3%
+Genel doğruluk — +Judge    : 3208/3842 = 83.5%
+══════════════════════════════════════════════════════════
 ```
 
-## Credits
+Karar detayları `benchmark_logs/twt_benchmark.jsonl` dosyasına JSONL formatında yazılır.  
+Her satır bir cümleyi; her cümle içindeki her token için baseline, LLM ve judge seçimlerini içerir.
 
-**[Zemberek NLP](https://github.com/ahmetaa/zemberek-nlp)** — An open-source Turkish NLP library developed by Ahmet Afşın Akın. This project uses Zemberek's `TurkishMorphology` module for generating morphological analysis candidates.
+---
 
-**[Wikipedia](https://tr.wikipedia.org)** — Turkish Wikipedia articles are used as source text. Wikipedia content is available under the [Creative Commons Attribution-ShareAlike 4.0](https://creativecommons.org/licenses/by-sa/4.0/) license.
+## Proje Yapısı
+
+```
+.
+├── run.sh                        ← Ana çalıştırma betiği (derle + gateway + analiz)
+├── benchmark.sh                  ← Benchmark betiği (derle + gateway + TWT değerlendirmesi)
+├── source.txt                    ← Analiz edilecek Wikipedia URL listesi
+├── scrapWikipedia.py             ← Wikipedia makale scraper'ı
+│
+├── Zemberek Morfoloji/           ← Java katmanı
+│   ├── java_gateway/
+│   │   └── ZemberekGateway.java  ← py4j köprüsü, Zemberek'i Python'a açar
+│   ├── lib/
+│   │   └── zemberek-full.jar     ← Zemberek NLP kütüphanesi
+│   └── start_zemberek_gateway.sh ← Gateway'i ayrıca başlatmak için
+│
+├── LLMBaseRanking/               ← Python analiz motoru
+│   ├── main.py                   ← Giriş noktası
+│   ├── ranker.py                 ← LLM prompt + JSON parse + yeniden sıralama
+│   ├── chunker.py                ← Metin parçalama stratejileri
+│   ├── zemberek_client.py        ← py4j üzerinden Zemberek istemcisi
+│   └── config.py                 ← .env okuyucu
+│
+├── Benchmark/                    ← Değerlendirme modülü
+│   ├── benchmark.py              ← TWT CoNLL-U değerlendirme motoru
+│   ├── dataset_loader.py         ← CoNLL-U dosya okuyucu
+│   └── morpheme_normalizer.py    ← Morfem string normalleştirici
+│
+└── benchmark_logs/
+    └── twt_benchmark.jsonl       ← Benchmark karar logu (JSONL)
+```
+
+---
+
+## Referanslar
+
+**[Zemberek NLP](https://github.com/ahmetaa/zemberek-nlp)** — Ahmet Afşın Akın tarafından geliştirilen açık kaynaklı Türkçe NLP kütüphanesi. Bu proje, morfolojik aday üretimi için Zemberek'in `TurkishMorphology` modülünü kullanmaktadır.
+
+**[Google Turkish Web Treebank](https://github.com/google-research-datasets/turkish-treebanks)** — Google tarafından yayımlanan, insan-anotasyonlu Türkçe bağımlılık ağacı bankası. Benchmark değerlendirmesinde kullanılmaktadır.
+
+**[Wikipedia TR](https://tr.wikipedia.org)** — Kaynak metin olarak Türkçe Wikipedia makaleleri kullanılmaktadır. İçerik [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) lisansı altındadır.
