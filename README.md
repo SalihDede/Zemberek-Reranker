@@ -140,7 +140,10 @@ Paragraph 1: Koyun otluyordu.
 ## Benchmark
 
 Sistem, Google **Turkish Web Treebank (TWT)** veri setiyle değerlendirilir.  
-TWT, insan-anotasyonlu CoNLL-U formatında Türkçe cümleler içerir.
+TWT, insan-anotasyonlu CoNLL-U formatında Türkçe cümleler içerir — ve diğer Türkçe ağaçbankalarından
+(UD treebank'ları, TrMor2018 vb.) farklı olarak, kelimeleri gerçek **yüzey ek/kök** seviyesinde
+böler (soyut gramer etiketi değil). Bu yüzden surface-segmentasyon benchmark'ı için kullanılabilen
+nadir/tek Türkçe kaynak budur.
 
 ### Değerlendirme Yöntemi
 
@@ -148,6 +151,31 @@ TWT, insan-anotasyonlu CoNLL-U formatında Türkçe cümleler içerir.
 - Baseline: Zemberek'in ilk adayı (kural-tabanlı)
 - LLM: Bu projenin seçimi
 - Karşılaştırma: Seçilen morfem dizisi, TWT'nin gold morfem dizisiyle eşleşiyor mu?
+
+### Akış
+
+Judge, **sadece** Pure LLM'in (TWT gold'una göre) yanlış seçtiği belirsiz kelimelere gönderilir;
+doğru seçilen kelimeler judge'a hiç gitmeden "doğru" işaretli kalır. Tek adaylı kelimeler ise
+LLM'e hiç gönderilmez — Zemberek'in tek seçeneği ne ise odur, doğru/yanlış olması fark etmez.
+
+![Akış diyagramı](image/zemberek-nlp.png)
+
+Her kelime, `benchmark_logs/*.jsonl` log'unda şu yedi etiketten (`label` alanı) birini alır:
+
+| Etiket | Anlamı |
+|---|---|
+| `tek_aday_dogru` | Zemberek'te tek aday var, gold'a uyuyor (LLM çağrılmadı) |
+| `tek_aday_yanlis` | Zemberek'te tek aday var, gold'a uymuyor (düzeltilecek başka aday yok) |
+| `llm_dogruladi` | LLM (judge'sız) gold'a göre doğru seçti |
+| `llm_judge_dogruladi` | LLM yanlıştı, judge'a gitti, judge doğru seçti |
+| `judge_basarisiz` | LLM yanlıştı, judge'a gitti, judge da düzeltemedi |
+| `llm_yanlis` | LLM yanlış ama `--judge` kapalı olduğu için hiç denenmedi |
+| `analiz_yok` | Zemberek hiç aday üretemedi |
+| `tek_ig_atlandi` | Gold tarafı tek-IG, değerlendirme dışı |
+
+`judge_basarisiz` durumunda, LLM ve Judge'ın **bağımsız olarak aynı (gold'dan farklı) analizde**
+buluşup buluşmadığını gösteren bir `note` alanı da eklenir — bu uzlaşma, seçimin gold'a göre
+"yanlış" olsa da dilbilimsel olarak savunulabilir bir alternatif olma ihtimaline işaret eder.
 
 ### Benchmark'ı Çalıştırma
 
@@ -197,7 +225,26 @@ Genel doğruluk — +Judge    : 3208/3842 = 83.5%
 ```
 
 Karar detayları `benchmark_logs/twt_benchmark.jsonl` dosyasına JSONL formatında yazılır.  
-Her satır bir cümleyi; her cümle içindeki her token için baseline, LLM ve judge seçimlerini içerir.
+Her satır bir cümleyi; her cümle içindeki her token için baseline, LLM ve judge seçimlerini,
+ayrıca yukarıdaki `label` ve `note` alanlarını içerir.
+
+### Yanlışların İkinci Kez Denetlenmesi (opsiyonel, ayrı araç)
+
+Benchmark'ın "yanlış" saydığı tahminlerin bir kısmı, gold'dan farklı ama dilbilimsel olarak
+kabul edilebilir alternatif analizler olabilir. Bunu sorgulamak için ayrı, elle çalıştırılan
+iki script var — benchmark'ın bir parçası değil, sonradan isteğe bağlı çalıştırılır:
+
+```bash
+# 1. twt_benchmark.jsonl'den yanlışları çek
+python benchmark_logs/extract_wrong.py
+
+# 2. 5 farklı LLM hakemine sor, çoğunluk oyuyla karar ver
+python benchmark_logs/llm_jury.py
+```
+
+`llm_jury.py`, ana sistemin Pure/Judge geçişlerinden **tamamen bağımsız** 5 modeli (varsayılan:
+Claude Haiku, Gemini Flash, Llama 3.3, Mistral Small, GPT-4o-mini — `.env` ile değiştirilebilir)
+paralel sorgular, checkpoint/resume destekler, sonucu `jury_results.json`'a yazar.
 
 ---
 
@@ -230,7 +277,9 @@ Her satır bir cümleyi; her cümle içindeki her token için baseline, LLM ve j
 │   └── morpheme_normalizer.py    ← Morfem string normalleştirici
 │
 └── benchmark_logs/
-    └── twt_benchmark.jsonl       ← Benchmark karar logu (JSONL)
+    ├── twt_benchmark.jsonl       ← Benchmark karar logu (JSONL, koşu sonrası oluşur)
+    ├── extract_wrong.py          ← JSONL'den yanlış tahminleri çeker
+    └── llm_jury.py               ← 5 modelli bağımsız ikinci denetim (opsiyonel)
 ```
 
 ---
