@@ -160,7 +160,7 @@ LLM'e hiç gönderilmez — Zemberek'in tek seçeneği ne ise odur, doğru/yanl�
 
 ![Akış diyagramı](image/zemberek-nlp.png)
 
-Her kelime, `benchmark_logs/*.jsonl` log'unda şu yedi etiketten (`label` alanı) birini alır:
+Her kelime, `benchmark_logs/*.jsonl` log'unda şu sekiz etiketten (`label` alanı) birini alır:
 
 | Etiket | Anlamı |
 |---|---|
@@ -168,7 +168,8 @@ Her kelime, `benchmark_logs/*.jsonl` log'unda şu yedi etiketten (`label` alanı
 | `tek_aday_yanlis` | Zemberek'te tek aday var, gold'a uymuyor (düzeltilecek başka aday yok) |
 | `llm_dogruladi` | LLM (judge'sız) gold'a göre doğru seçti |
 | `llm_judge_dogruladi` | LLM yanlıştı, judge'a gitti, judge doğru seçti |
-| `judge_basarisiz` | LLM yanlıştı, judge'a gitti, judge da düzeltemedi |
+| `judge_basarisiz` | LLM yanlıştı, judge'a gitti, judge da düzeltemedi — **ama doğru aday adaylar arasında vardı** (gerçek, düzeltilebilir hata) |
+| `zemberek_kapsam_disi` | LLM yanlıştı, judge'a gitti, judge da düzeltemedi — **gold'a uyan tek bir aday Zemberek'in ürettiği listede hiç yok** (kazanılamaz; bkz. aşağıdaki not) |
 | `llm_yanlis` | LLM yanlış ama `--judge` kapalı olduğu için hiç denenmedi |
 | `analiz_yok` | Zemberek hiç aday üretemedi |
 | `tek_ig_atlandi` | Gold tarafı tek-IG, değerlendirme dışı |
@@ -176,6 +177,27 @@ Her kelime, `benchmark_logs/*.jsonl` log'unda şu yedi etiketten (`label` alanı
 `judge_basarisiz` durumunda, LLM ve Judge'ın **bağımsız olarak aynı (gold'dan farklı) analizde**
 buluşup buluşmadığını gösteren bir `note` alanı da eklenir — bu uzlaşma, seçimin gold'a göre
 "yanlış" olsa da dilbilimsel olarak savunulabilir bir alternatif olma ihtimaline işaret eder.
+
+#### Önemli bulgu: hataların ~%63'ü Zemberek kapsam eksikliği, model hatası değil
+
+Judge'ın düzeltemediği kelimelerin gerçek koşuda incelenmesi şunu gösterdi: bu kelimelerin
+**%63'ünde Zemberek'in ürettiği aday listesinde gold'a uyan tek bir seçenek bile yok** —
+yani hiçbir LLM/Judge stratejisi bu kelimeleri doğru bulamaz, çünkü doğru cevap hiç sunulmuyor.
+
+Sebep, Zemberek'in bazı `-la/-le` türetilmiş fiilleri **kendi sözlüğünde atomik kök** olarak
+tutması (örn. `açıklamak`, `anlaşmak`, `yorumlamak`, `zayıflamak`, `kesişmek`), TWT'nin ise
+her zaman en derin türetme sınırına kadar bölmesi (`açık+la`, `anla+ş`, `yorum+la`, `zayıf+la`,
+`kes+iş`):
+
+```
+açıklayıcı   gold: açık+la+yıcı     Zemberek'in TÜM adayları: açıkla+yıcı   (açık+la hiç yok)
+anlaşma      gold: anla+ş+ma        Zemberek'in TÜM adayları: anlaş+ma     (anla+ş hiç yok)
+ZAYIFLAMA    gold: zayıf+la+ma      Zemberek'in TÜM adayları: zayıfla+ma   (zayıf+la hiç yok)
+```
+
+Bu, LLM rerank yaklaşımının değil, **Zemberek'in morfotaktik kapsamının** bir sınırı —
+benchmark'taki gerçek/düzeltilebilir hata oranı `judge_basarisiz` sayısıyla, kazanılamaz
+oran ise `zemberek_kapsam_disi` sayısıyla takip edilmelidir.
 
 ### Benchmark'ı Çalıştırma
 
@@ -206,23 +228,26 @@ Ek seçenekler:
 
 ### Benchmark Çıktısı
 
-```
-══════════════════════════════════════════════════════════
-BENCHMARK — WEB
-══════════════════════════════════════════════════════════
-Toplam kelime              : 3842
-  Belirsiz (LLM gerekli)   : 1205
-  Tek adaylı               : 2637
+Aşağıdaki rakamlar `google/gemma-4-31b-it` ile, `--judge` etkin, TWT'nin tamamı (4.851 cümle,
+web + wiki) üzerinde yapılan tam bir koşunun gerçek sonuçlarıdır:
 
-Disambiguation accuracy (belirsiz kelimeler):
-  Baseline        : 891/1205 = 74.0%
-  Pure LLM        : 963/1205 = 79.9%  (+5.9% vs baseline)
-  LLM + Judge     : 971/1205 = 80.6%  (+6.6% vs baseline  +0.7% vs pure)
+| | web.conllu | wiki.conllu | **Toplam** |
+|---|---|---|---|
+| Toplam kelime | 4.522 | 6.886 | **11.408** |
+| Belirsiz (LLM gerekli) | 2.745 | 4.334 | **7.079** |
+| Tek adaylı | 1.777 (%88.2 doğru) | 2.552 (%86.6 doğru) | 4.329 (%87.2 doğru) |
 
-Genel doğruluk — Pure LLM  : 3200/3842 = 83.3%
-Genel doğruluk — +Judge    : 3208/3842 = 83.5%
-══════════════════════════════════════════════════════════
-```
+**Disambiguation accuracy (belirsiz kelimeler):**
+
+| | web | wiki | **Toplam** |
+|---|---|---|---|
+| Baseline | 1545/2745 = %56.3 | 2487/4334 = %57.4 | 4032/7079 = **%57.0** |
+| Pure LLM | 2200/2745 = %80.1 (+23.9) | 3593/4334 = %82.9 (+25.5) | 5793/7079 = **%81.8** (+24.9) |
+| LLM + Judge | 2229/2745 = %81.2 (+24.9 / +1.1 vs pure) | 3632/4334 = %83.8 (+26.4 / +0.9 vs pure) | 5861/7079 = **%82.8** (+25.8 / +1.0 vs pure) |
+
+**Genel doğruluk:** Pure LLM = 9569/11408 = **%83.9**, +Judge = 9637/11408 = **%84.5**
+
+**Kazanılamaz oran** (`zemberek_kapsam_disi` / (`zemberek_kapsam_disi` + `judge_basarisiz`)): 773/1218 = **%63.5** — judge'ın "düzeltemediği" durumların üçte ikisinde doğru cevap zaten Zemberek'in aday listesinde yoktu (yukarıdaki bulguya bakınız).
 
 Karar detayları `benchmark_logs/twt_benchmark.jsonl` dosyasına JSONL formatında yazılır.  
 Her satır bir cümleyi; her cümle içindeki her token için baseline, LLM ve judge seçimlerini,
