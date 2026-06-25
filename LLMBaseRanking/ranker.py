@@ -1,15 +1,19 @@
 import json
 import re
+import threading
 from openai import OpenAI
 from config import LLM_BASE_URL, LLM_MODEL, LLM_API_KEY
 
 _client = None
+_client_lock = threading.Lock()
 
 
 def _get_client() -> OpenAI:
     global _client
     if _client is None:
-        _client = OpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
+        with _client_lock:
+            if _client is None:
+                _client = OpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
     return _client
 
 
@@ -179,18 +183,10 @@ def judge_and_rerank(
 
     new_selections = _parse_raw(raw)
 
-    # Retry
+    # Retry: aynı prompt ile (aynı sistemle) tekrar dene
     if new_selections is None:
-        retry = (
-            f'Cümle: "{sentence}"\n\n'
-            + "\n".join(
-                f'"{w}": ' + " | ".join(f"{i}={c}" for i, c in enumerate(cands))
-                for w, cands in ambiguous.items()
-            )
-            + '\n\nSadece JSON: {"kelime": indeks_sayısı}'
-        )
         try:
-            raw = _call_llm(retry, client, use_json_format=False)
+            raw = _call_llm(cot_prompt, client, use_json_format=False, temperature=0.3)
             new_selections = _parse_raw(raw)
         except Exception:
             new_selections = None
@@ -260,19 +256,10 @@ def rank_sentence(sentence: str, word_analyses: dict[str, list[str]]) -> dict[st
 
     selections = _parse_raw(raw)
 
-    # Retry: JSON parse başarısızsa daha sade prompt ile tekrar dene
+    # Retry: JSON parse başarısızsa aynı prompt ile (aynı sistemle) tekrar dene
     if selections is None:
-        retry_prompt = (
-            f"Etiket sözlüğü:\n{legend}\n\n"
-            f'Cümle: "{sentence}"\n\n'
-            + "\n".join(
-                f'"{w}": ' + " | ".join(f"{i}={c}" for i, c in enumerate(cands))
-                for w, cands in ambiguous.items()
-            )
-            + '\n\nSadece JSON: {"kelime": indeks_sayısı}'
-        )
         try:
-            raw = _call_llm(retry_prompt, client, use_json_format=use_json_format)
+            raw = _call_llm(prompt, client, use_json_format=use_json_format)
             selections = _parse_raw(raw)
         except Exception:
             selections = None
