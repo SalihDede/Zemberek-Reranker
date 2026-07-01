@@ -1,0 +1,7 @@
+openai>=1.0.0
+python-dotenv>=1.0.0
+requests>=2.28.0
+py4j>=0.10.9
+turkish-morphology>=1.2.0
+nlptoolkit-morphologicalanalysis>=1.0.50
+nlptoolkit-morphologicaldisambiguation>=1.0.18

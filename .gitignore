@@ -16,6 +16,11 @@ hs_err_pid*.log
 WikiOutput.txt
 WikiOutput.json
 
+# Benchmark data & results (large files)
+benchmark_data/
+benchmark_logs/extract_wrong.py
+benchmark_logs/llm_jury.py
+
 # IDE
 .vscode/
 .idea/
