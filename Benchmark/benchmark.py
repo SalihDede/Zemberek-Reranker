@@ -27,9 +27,56 @@ for _p in (_here, _llm, _root):
         sys.path.insert(0, _p)
 
 from zemberek_client import ZemberekClient
-from ranker import rank_sentence, judge_and_rerank
-from morpheme_normalizer import normalize
+from ranker import rank_sentence, judge_and_rerank, _TAG_LEGEND, _GOOGLE_TAG_LEGEND, _STARLANG_TAG_LEGEND, _HYBRID_LEGEND
+import morpheme_normalizer
 from dataset_loader import load_twt
+
+# google ve starlang backend'leri lazy import edilir — sadece --backend ile
+# seçilince yüklenir. Bu sayede zemberek modunda requests→urllib3 zinciri
+# tetiklenmez ve macOS'un LibreSSL'inden kaynaklanan NotOpenSSLWarning ortaya
+# çıkmaz.
+
+# Aktif motora göre seçilir — varsayılan Zemberek.
+normalize = morpheme_normalizer.normalize
+_legend_text = _TAG_LEGEND
+
+
+def _make_client(backend: str):
+    if backend == 'google':
+        from google_morphology_client import GoogleMorphologyClient
+        return GoogleMorphologyClient()
+    if backend == 'starlang':
+        from starlang_client import StarlangClient
+        return StarlangClient()
+    if backend == 'hybrid_zemberek':
+        from hybrid_client import HybridClient
+        return HybridClient()
+    if backend == 'hybrid_starlang':
+        from hybrid_starlang_client import HybridStarlangClient
+        return HybridStarlangClient()
+    return ZemberekClient()
+
+
+def _select_backend(backend: str) -> None:
+    global normalize, _legend_text
+    if backend == 'google':
+        import google_morpheme_normalizer
+        normalize = google_morpheme_normalizer.normalize
+        _legend_text = _GOOGLE_TAG_LEGEND
+    elif backend == 'starlang':
+        import hybrid_morpheme_normalizer
+        normalize = hybrid_morpheme_normalizer.normalize
+        _legend_text = _HYBRID_LEGEND
+    elif backend in ('hybrid_zemberek', 'hybrid_starlang'):
+        import hybrid_morpheme_normalizer
+        normalize = hybrid_morpheme_normalizer.normalize
+        _legend_text = _HYBRID_LEGEND
+    else:
+        normalize = morpheme_normalizer.normalize
+        _legend_text = _TAG_LEGEND
+
+
+_BACKENDS = ('zemberek', 'google', 'starlang', 'hybrid_zemberek', 'hybrid_starlang')  # argparse choices için
 
 
 def _tr_lower(text: str) -> str:
@@ -144,6 +191,17 @@ def _seg_match(system_str: str, gold_igs: list[str]) -> bool:
     return i == len(gold_igs) and current == ''
 
 
+def _has_winnable_candidate(p: dict) -> bool:
+    """
+    Zemberek'in ürettiği adaylardan EN AZ BİRİ gold ile eşleşiyor mu?
+    Hayırsa, bu kelime hiçbir LLM/Judge stratejisiyle doğru bulunamaz —
+    sorun model performansı değil, Zemberek'in sözlük/morfotaktik kapsamı
+    (örn. "açıklamak" kendi atomik kökü olarak listelenmiş, "açık+la"
+    bölünmüş hali aday listesinde hiç yok).
+    """
+    return any(_seg_match(normalize(c), p['gold_igs']) for c in p['candidates'])
+
+
 def _label(p: dict, judge_invoked: bool, use_judge: bool, judge_ok: bool) -> str:
     """
     Kelimenin değerlendirme sürecindeki durumunu tek bir etiketle özetler:
@@ -152,7 +210,11 @@ def _label(p: dict, judge_invoked: bool, use_judge: bool, judge_ok: bool) -> str
                              düzeltilecek bir şey yok, Zemberek'in başka adayı yok)
       llm_dogruladi        — LLM (judge'sız) gold'a göre doğru seçti
       llm_judge_dogruladi  — LLM yanlıştı, judge'a gitti, judge doğru seçti
-      judge_basarisiz      — LLM yanlıştı, judge'a gitti, judge da yanlış seçti
+      judge_basarisiz      — LLM yanlıştı, judge'a gitti, judge da yanlış seçti — AMA adaylar
+                             arasında doğru cevap vardı (gerçek, düzeltilebilir hata)
+      zemberek_kapsam_disi — LLM yanlıştı, judge'a gitti, judge da yanlış seçti — adaylar
+                             arasında gold'a uyan TEK BİR ADAY YOK (kazanılamaz, Zemberek
+                             kapsam eksikliği — LLM/Judge performansıyla ilgisi yok)
       llm_yanlis           — LLM yanlış ama judge'a gitmedi (--judge kapalı)
       analiz_yok           — Zemberek hiç aday üretemedi
       tek_ig_atlandi       — gold tarafı tek-IG, değerlendirme dışı
@@ -164,7 +226,9 @@ def _label(p: dict, judge_invoked: bool, use_judge: bool, judge_ok: bool) -> str
     if p['pure_ok']:
         return 'llm_dogruladi'
     if judge_invoked:
-        return 'llm_judge_dogruladi' if judge_ok else 'judge_basarisiz'
+        if judge_ok:
+            return 'llm_judge_dogruladi'
+        return 'judge_basarisiz' if _has_winnable_candidate(p) else 'zemberek_kapsam_disi'
     return 'llm_yanlis'
 
 
@@ -207,7 +271,7 @@ def _process_sentence(
     if not word_analyses:
         return None
 
-    pure_rankings = rank_sentence(sentence.text, word_analyses)
+    pure_rankings = rank_sentence(sentence.text, word_analyses, legend_text=_legend_text)
 
     # İlk geçiş: baseline + pure seçimlerini ve gold'a göre doğruluklarını hesapla.
     pending = []
@@ -230,14 +294,21 @@ def _process_sentence(
         })
 
     # Judge çağrısı: yalnızca belirsiz VE pure LLM'in yanlış seçtiği kelimeler için.
+    # Adaylar word_analyses'ten değil pending'den alınır: _get_candidates() bazı
+    # kelimeler için (büyük/küçük harf eşleşmesi bulunamazsa) Zemberek'e doğrudan
+    # analyze_word() ile gidiyor ve sonucu word_analyses sözlüğüne eklemiyor.
     wrong_words = {
         p['word'] for p in pending
         if use_judge and p['evaluated'] and len(p['candidates']) > 1 and not p['pure_ok']
     }
     judge_rankings = {}
     if wrong_words:
-        wrong_word_analyses = {w: word_analyses[w] for w in wrong_words}
-        judge_rankings = judge_and_rerank(sentence.text, wrong_word_analyses, pure_rankings)
+        wrong_word_analyses = {
+            p['word']: p['candidates'] for p in pending if p['word'] in wrong_words
+        }
+        judge_rankings = judge_and_rerank(
+            sentence.text, wrong_word_analyses, pure_rankings, legend_text=_legend_text,
+        )
 
     sent_log = {
         'dataset': os.path.basename(twt_path),
@@ -430,10 +501,17 @@ def main():
     parser.add_argument('--judge',   action='store_true', help='LLM-as-Judge aşamasını etkinleştir')
     parser.add_argument('--limit',   type=int, default=0, help='Maks cümle sayısı (0=tümü)')
     parser.add_argument('--json-log', default='', help='Cümle bazlı JSONL karar logu yazılacak dosya')
+    parser.add_argument(
+        '--backend', choices=list(_BACKENDS), default='zemberek',  # type: ignore[arg-type]
+        help='Morfolojik aday üretici motor: zemberek (py4j, varsayılan), '
+             'google (Docker üzerindeki turkish-morphology Gateway) veya '
+             'starlang (NlpToolkit-MorphologicalDisambiguation, in-process)',
+    )
     args = parser.parse_args()
 
+    _select_backend(args.backend)
     try:
-        zemberek = ZemberekClient()
+        zemberek = _make_client(args.backend)
     except ConnectionError as e:
         print(f'Hata: {e}', file=sys.stderr)
         sys.exit(1)

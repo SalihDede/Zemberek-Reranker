@@ -9,3 +9,6 @@ LLM_API_KEY = os.getenv("LLM_API_KEY", "ollama")
 
 ZEMBEREK_HOST = os.getenv("ZEMBEREK_HOST", "localhost")
 ZEMBEREK_PORT = int(os.getenv("ZEMBEREK_PORT", "25333"))
+
+GOOGLE_MORPH_HOST = os.getenv("GOOGLE_MORPH_HOST", "localhost")
+GOOGLE_MORPH_PORT = int(os.getenv("GOOGLE_MORPH_PORT", "8765"))

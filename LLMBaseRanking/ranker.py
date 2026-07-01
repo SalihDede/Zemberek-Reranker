@@ -73,18 +73,111 @@ Zero=sıfır türetme (ek olmadan tür değişimi)
 """.strip()
 
 
-def _filter_legend(word_analyses: dict[str, list[str]]) -> str:
+# Google turkish-morphology'nin etiket şeması Zemberek'ten tamamen farklı
+# (Category=Value çiftleri, örn. "Derivation=Make", "PersonNumber=A3sg").
+_GOOGLE_TAG_LEGEND = """
+# Sözcük türleri (IG başındaki köşeli parantez)
+NN=isim  VB=fiil  ADJ=sıfat  ADV=zarf  NOMP=isim-fiil/mastar  VN=fiilden isim
+CC=bağlaç/edat  DET=belirteç  NUM=sayı  PRON=zamir  INTJ=ünlem  PUNCT=noktalama
+
+# Türetme (Derivation) değerleri
+Make=isimden/sıfattan fiil yapma (-la/-le)  Bcm=olma (-laş/-leş)  Acq=kazanma (-lan/-len)
+Rcp=işteş (-ş)  Pass=edilgen (-n/-ıl)  Caus=ettirgen (-t/-dır)  Able=yeterlilik (-abil)
+Inf=mastar (-mak)  Nonf=isim-fiil (-ma)  PresNom=şimdiki ad-fiil (-an)  AorNom=geniş ad-fiil (-ır)
+PresPart=şimdiki sıfat-fiil (-an)  PastNom=geçmiş ad-fiil (-dık)  FutPart=gelecek sıfat-fiil (-acak)
+With=-lı  Without=-sız  Ness=-lık  Rel=ilgi (-ki)  Agt=yapan (-cı)
+
+# Kişi/uyum (PersonNumber) ve iyelik (Possessive)
+A1sg=ben(isim)  A2sg=sen(isim)  A3sg=o(isim)  A1pl=biz(isim)  A2pl=siz(isim)  A3pl=onlar(isim)
+V1sg=ben(fiil)  V2sg=sen(fiil)  V3sg=o(fiil)  V1pl=biz(fiil)  V2pl=siz(fiil)  V3pl=onlar(fiil)
+Pnon=iyelik yok  P1sg=benim(-m)  P2sg=senin(-n)  P3sg=onun(-ı/sı)  P1pl=bizim  P2pl=sizin  P3pl=onların
+
+# Hâl (Case)
+Bare=çekimsiz/yalın  Nom=yalın  Acc=belirtme(-ı)  Dat=yönelme(-a)  Loc=bulunma(-da)
+Abl=ayrılma(-dan)  Gen=tamlayan(-ın)  Ins=vasıta(-la)
+
+# Zaman / kip / olumsuzluk
+Polarity=olumluluk(Pos=olumlu,Neg=olumsuz)  TenseAspectMood=zaman-kip
+Imp=emir  Aor=geniş zaman  Opt=istek  Cond=şart  Past=geçmiş  Prog=şimdiki süreğen
+Copula=ek fiil(PresCop=şimdiki zaman ek fiili)  Proper=özel isim mi
+""".strip()
+
+
+# Starlang (TurkishMorphologicalDisambiguation) transitionList() etiketleri
+# büyük harf yazılır ama Zemberek ile aynı kavramsal şemayı (Oflazer geleneği)
+# paylaşır — "koy+NOUN+A3SG+PNON+GEN" gibi. _filter_legend tam büyük harf
+# isimleri de eşleştirdiği için bu ayrı legend yalnızca isimlendirme farkını
+# (Noun→NOUN, Gen→GEN) ve Starlang'e özgü birkaç etiketi (INF, NARR, FUTPART...)
+# yansıtır.
+_STARLANG_TAG_LEGEND = """
+# Sözcük türleri
+NOUN=isim  VERB=fiil  ADJ=sıfat  ADV=zarf  POSTP=edat  CONJ=bağlaç  PRON=zamir
+NUM=sayı  DET=belirteç  QUES=soru  INTERJ=ünlem  DUP=ikileme  PUNC=noktalama
+PROP=özel isim  CARD=asıl sayı  ORD=sıra sayısı  DIST=üleştirme sayısı  TIME=zaman ismi
+
+# İyelik ekleri (P = possessive)
+PNON=iyelik yok  P1SG=benim (-m)  P2SG=senin (-n)  P3SG=onun (-ı/sı)
+P1PL=bizim (-mız)  P2PL=sizin (-nız)  P3PL=onların (-ları)
+
+# Kişi uyumu (A = agreement)
+A1SG=ben  A2SG=sen  A3SG=o  A1PL=biz  A2PL=siz  A3PL=onlar
+
+# Hâl ekleri
+NOM=yalın  ACC=belirtme (-ı)  DAT=yönelme (-a)  LOC=bulunma (-da)
+ABL=ayrılma (-dan)  GEN=tamlayan (-ın)  INS=vasıta (-la)  EQU=eşitlik (-ca)
+
+# Zaman / kip
+PRES=şimdiki  PROG1=şimdiki süreğen (-yor)  PROG2=şimdiki süreğen (-makta)
+AOR=geniş zaman (-r)  PAST=belirli geçmiş (-dı)  NARR=öğrenilen geçmiş (-mış)
+FUT=gelecek (-acak)  COND=şart (-sa)  IMP=emir  OPT=istek (-a)
+DESR=dilek (-sa)  NECES=gereklilik (-malı)  COP=ek fiil (-dır)
+
+# Çatı
+PASS=edilgen (-ıl/-ın)  CAUS=ettirgen (-tır)  RECIP=işteş (-ış)
+ABLE=yeterlilik (-abil)  REFLEX=dönüşlü (-ın)  NEG=olumsuzluk (-ma)  POS=olumlu
+
+# Sıfat-fiil (participle)
+PASTPART=geçmiş sıfat-fiil (-dık)  FUTPART=gelecek sıfat-fiil (-acak)  PRESPART=şimdiki sıfat-fiil (-an)
+
+# Mastar / isim-fiil
+INF=mastar (-mak)  ACTOF=eylem adı
+
+# İsimden/fiilden türetme
+NESS=nitelik/durum (-lık)  WITH=-lı  WITHOUT=-sız  REL=-ki  AGT=yapan (-cı)
+BECOME=-laş  ACQUIRE=-lan  LY=zarflaştırma (-ca)  JUSTLIKE=-vari  RELATED=-sal/-sel
+
+# Edat bağlama biçimleri (PC = Post Conjunction)
+PCNOM=yalın edat  PCDAT=yönelme edat  PCABL=ayrılma edat  PCGEN=tamlayan edat  PCINS=vasıta edat
+
+# Zarf-fiil (converb)
+WHILE=-ken  WHEN=-ınca  BYDOINGSO=-arak  AFTERDOINGSO=-ıp  ASIF=-casına
+
+# Diğer
+ZERO=sıfır türetme (ek olmadan tür değişimi)
+""".strip()
+
+
+# Hybrid backend: adaylar zaten kök+ek+ek formatında, etiket yok.
+# LLM'e formatı kısaca açıkla.
+_HYBRID_LEGEND = """
+Adaylar "kök+ek+ek" formatında gerçek yüzey morfemleridir (örn. "imza+la+n+an").
+Starlang aday havuzu Google morphology ile kök seviyesinde zenginleştirilmiştir.
+Cümle bağlamına göre en uygun morfem bölünmesini seç.
+""".strip()
+
+
+def _filter_legend(word_analyses: dict[str, list[str]], legend_text: str = _TAG_LEGEND) -> str:
     """Analizlerde geçen etiketleri bulup ilgili legend satırlarını döndürür."""
     all_text = " ".join(c for candidates in word_analyses.values() for c in candidates)
     relevant = []
-    for line in _TAG_LEGEND.splitlines():
+    for line in legend_text.splitlines():
         if not line or line.startswith("#"):
             continue
         # Satırdaki kısaltmaları (büyük harf+küçük harf kombinasyonları) çek
         tags = re.findall(r'\b[A-Z][A-Za-z0-9]+\b', line)
         if any(tag in all_text for tag in tags):
             relevant.append(line)
-    return "\n".join(relevant) if relevant else _TAG_LEGEND
+    return "\n".join(relevant) if relevant else legend_text
 
 
 def _build_prompt(sentence: str, ambiguous: dict[str, list[str]], legend: str) -> str:
@@ -158,12 +251,17 @@ def judge_and_rerank(
     sentence: str,
     word_analyses: dict[str, list[str]],
     initial_selections: dict[str, str],
+    legend_text: str = _TAG_LEGEND,
 ) -> dict[str, str]:
     """
     LLM-as-Judge (CoT ikinci geçiş):
     - İlk seçimi bağımsız olarak yeniden değerlendirir
     - Chain-of-thought ile gramer rolünü analiz eder
     - Döndürür: {kelime: seçilen_analiz_metni}
+
+    legend_text: Zemberek dışı bir motor (örn. Google turkish-morphology,
+    Starlang) kullanılıyorsa sırasıyla _GOOGLE_TAG_LEGEND / _STARLANG_TAG_LEGEND
+    verilmeli — etiket şeması farklı.
     """
     ambiguous = {
         w: c for w, c in word_analyses.items()
@@ -172,14 +270,17 @@ def judge_and_rerank(
     if not ambiguous:
         return initial_selections
 
-    legend = _filter_legend(ambiguous)
+    legend = _filter_legend(ambiguous, legend_text)
     client = _get_client()
 
     cot_prompt = _build_cot_prompt(sentence, ambiguous, initial_selections, legend)
     try:
         raw = _call_llm(cot_prompt, client, use_json_format=True, temperature=0.3)
     except Exception:
-        raw = _call_llm(cot_prompt, client, use_json_format=False, temperature=0.3)
+        try:
+            raw = _call_llm(cot_prompt, client, use_json_format=False, temperature=0.3)
+        except Exception:
+            raw = None
 
     new_selections = _parse_raw(raw)
 
@@ -204,14 +305,16 @@ def judge_and_rerank(
     return result
 
 
-def _parse_raw(raw: str) -> "dict | None":
+def _parse_raw(raw: "str | None") -> "dict | None":
+    if not raw:
+        return None
     match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw, re.DOTALL)
     if match:
         raw = match.group(1)
     raw = raw.strip()
     try:
         return json.loads(raw)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError, ValueError):
         return None
 
 
@@ -224,13 +327,26 @@ def _call_llm(prompt: str, client: OpenAI, use_json_format: bool, temperature: f
     if use_json_format:
         kwargs["response_format"] = {"type": "json_object"}
     response = client.chat.completions.create(**kwargs)
-    return response.choices[0].message.content.strip()
+    if not response.choices:
+        raise ValueError(f"LLM boş/null choices döndürdü (model={LLM_MODEL})")
+    content = response.choices[0].message.content
+    if content is None:
+        raise ValueError(f"LLM null içerik döndürdü (model={LLM_MODEL})")
+    return content.strip()
 
 
-def rank_sentence(sentence: str, word_analyses: dict[str, list[str]]) -> dict[str, str]:
+def rank_sentence(
+    sentence: str,
+    word_analyses: dict[str, list[str]],
+    legend_text: str = _TAG_LEGEND,
+) -> dict[str, str]:
     """
     Bir cümle için LLM'den doğru morfolojik analizleri alır.
     Döndürür: {kelime: seçilen_analiz_metni}
+
+    legend_text: Zemberek dışı bir motor (örn. Google turkish-morphology,
+    Starlang) kullanılıyorsa sırasıyla _GOOGLE_TAG_LEGEND / _STARLANG_TAG_LEGEND
+    verilmeli — etiket şeması farklı.
     """
     if not word_analyses:
         return {}
@@ -242,7 +358,7 @@ def rank_sentence(sentence: str, word_analyses: dict[str, list[str]]) -> dict[st
     if not ambiguous:
         return result
 
-    legend = _filter_legend(ambiguous)
+    legend = _filter_legend(ambiguous, legend_text)
     prompt = _build_prompt(sentence, ambiguous, legend)
     client = _get_client()
 
@@ -252,7 +368,10 @@ def rank_sentence(sentence: str, word_analyses: dict[str, list[str]]) -> dict[st
         raw = _call_llm(prompt, client, use_json_format=True)
     except Exception:
         use_json_format = False
-        raw = _call_llm(prompt, client, use_json_format=False)
+        try:
+            raw = _call_llm(prompt, client, use_json_format=False)
+        except Exception:
+            raw = None
 
     selections = _parse_raw(raw)
 
